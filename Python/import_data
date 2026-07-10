@@ -1,0 +1,163 @@
+import requests
+import pandas as pd
+import psycopg2
+from decimal import Decimal
+import re
+from bs4 import BeautifulSoup
+
+# ========== 1. АВТОРИЗАЦИЯ ==========
+session = requests.Session()
+
+# Сначала заходим на главную, чтобы получить sessid
+response = session.get("https://test_site.ru/")
+soup = BeautifulSoup(response.text, 'html.parser')
+
+# Ищем sessid в скрытом поле формы
+sessid = None
+sessid_input = soup.find('input', {'name': 'sessid'})
+if sessid_input:
+    sessid = sessid_input.get('value')
+
+if not sessid:
+    # Пробуем найти в скриптах
+    scripts = soup.find_all('script')
+    for script in scripts:
+        if script.string and 'sessid' in script.string:
+            match = re.search(r'sessid[:\s]+"([a-f0-9]+)"', script.string)
+            if match:
+                sessid = match.group(1)
+                break
+
+if not sessid:
+    print("❌ Не удалось получить sessid")
+    exit()
+
+print(f"✅ Получен sessid: {sessid}")
+
+
+# Импортируем переменные из config.py
+try:
+    from config import PARF_LOGIN, PARF_PASSWORD
+except ImportError:
+    print("❌ Файл config.py не найден")
+    exit()
+
+# Параметры для POST запроса
+data = {
+    'sessid': sessid,
+    'COMPONENT_ID': 'bx_component_1',
+    'MODE': 'SVC_FORM_AUTHORIZE',
+    'backurl': '/',
+    'USER_LOGIN': PARF_LOGIN,
+    'USER_PASSWORD': PARF_PASSWORD
+}
+
+
+# Отправляем авторизацию
+response = session.post("https://test_site.ru/", data=data)
+
+# Проверяем авторизацию по наличию кук
+if 'PHPSESSID' in session.cookies or 'BITRIX_SM_UID' in session.cookies:
+    print("✅ Авторизация успешна")
+else:
+    print("❌ Ошибка авторизации")
+    print(f"Статус ответа: {response.status_code}")
+    print(f"URL после редиректа: {response.url}")
+    print("Куки:", session.cookies.get_dict())
+    exit()
+
+
+# ========== 2. СКАЧИВАЕМ ФАЙЛ ==========
+file_url = "https://test_site.ru/upload/goods/Актуальный%20прайс.xls"
+response = session.get(file_url)
+
+if response.status_code == 200:
+    with open("temp_price.xls", "wb") as f:
+        f.write(response.content)
+    print("✅ Файл скачан")
+else:
+    print(f"❌ Ошибка скачивания: {response.status_code}")
+    exit()
+
+print("✅ Авторизация и скачивание завершены")
+
+
+# После POST запроса добавь:
+print("Ответ сервера:", response.text[:500])
+# ========== 3. ЧИТАЕМ И ПАРСИМ ФАЙЛ ==========
+df = pd.read_excel("temp_price.xls", header=None)
+df.columns = ['articul', 'raw_name', 'price']
+
+# Очищаем данные
+df = df.dropna()
+df['articul'] = df['articul'].astype(int)
+df['price'] = df['price'].astype(str).str.replace(',', '.')
+df['price'] = pd.to_numeric(df['price'])
+
+
+# Функция для парсинга строки
+def parse_product_name(raw_text):
+    raw_text = str(raw_text)
+
+    # Проверяем на тестер
+    is_tester = 'тестер' in raw_text.lower()
+
+    # Удаляем " - Тестер" и подобные вариации
+    clean_text = re.sub(r'\s*-\s*[Тт]естер\s*', '', raw_text)
+    clean_text = re.sub(r'\s*[Тт]естер\s*', '', clean_text)
+
+    # Ищем размер (цифры с ml)
+    size_match = re.search(r'(\d+\s*ml)', clean_text.lower())
+    if size_match:
+        parf_size = size_match.group(1)
+        # Удаляем размер из строки
+        clean_text = re.sub(r'\s*\d+\s*ml\s*', '', clean_text, flags=re.IGNORECASE)
+    else:
+        parf_size = None
+
+    # Удаляем скобки с содержимым
+    clean_text = re.sub(r'\s*\([^)]*\)\s*', ' ', clean_text)
+
+    # Чистим пробелы
+    clean_text = ' '.join(clean_text.split()).strip()
+
+    return clean_text, parf_size, is_tester
+
+
+# Применяем парсинг
+parsed_data = df['raw_name'].apply(parse_product_name)
+df['parf_name'] = [x[0] for x in parsed_data]
+df['parf_size'] = [x[1] for x in parsed_data]
+df['is_tester'] = [x[2] for x in parsed_data]
+df = df.drop('raw_name', axis=1)
+
+# ========== 4. ЗАГРУЖАЕМ В БАЗУ ДАННЫХ ==========
+conn = psycopg2.connect(
+    host="localhost",
+    port="5432",
+    database="moi_db",
+    user="",
+    password=""
+)
+cur = conn.cursor()
+
+
+# Вставляем данные
+for _, row in df.iterrows():
+    cur.execute(
+        """INSERT INTO tests.products (articul, parf_name, parf_size, is_tester, price) 
+           VALUES (%s, %s, %s, %s, %s)""",
+        (int(row['articul']),
+         str(row['parf_name']),
+         row['parf_size'] if pd.notna(row['parf_size']) else None,
+         bool(row['is_tester']),
+         Decimal(str(row['price'])))
+    )
+
+conn.commit()
+cur.close()
+conn.close()
+
+print(f"✅ Код отработан. Загружено записей: {len(df)}")
+print("\n📊 Пример первых 5 записей:")
+print(df[['articul', 'parf_name', 'parf_size', 'is_tester', 'price']].head())
