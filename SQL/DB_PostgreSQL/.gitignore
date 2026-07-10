@@ -1,0 +1,48 @@
+# Secrets & configs
+.env
+*.env
+.pgpass
+.pg_service.conf
+*secret*.py
+*secret*.sql
+credentials*.py
+credentials*.sql
+config_local.py
+config_local.sql
+
+# IDEs
+.idea/
+*.iml
+.vscode/
+.DS_Store
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+
+# DBeaver
+*.dbeaver-data-sources.xml
+*.dbeaver-project
+.dbeaver/
+*.dbeaver
+
+# Logs & temporary
+*.log
+*.tmp
+*.temp
+
+# Database dumps (если вдруг)
+*.dump
+*.backup
+*.sql.gz
+*.sql.bz2
+
+# OS
+.DS_Store
+Thumbs.db
+._*
